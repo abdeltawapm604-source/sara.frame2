@@ -3,7 +3,7 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import Image from "next/image";
 import { motion, useInView, AnimatePresence } from "framer-motion";
-import { Heart, MessageCircle, MoreHorizontal, Bookmark, Scan } from "lucide-react";
+import { Heart, MessageCircle, Send, MoreHorizontal, Bookmark, Scan } from "lucide-react";
 import type { Category } from "@/components/Header";
 import AuthModal from "@/components/AuthModal";
 import { useAuth } from "@/hooks/useAuth";
@@ -19,6 +19,7 @@ export interface Photo {
   width: number;
   height: number;
   aspect: number;
+  isUploaded?: boolean;
 }
 
 interface MasonryGalleryProps {
@@ -51,6 +52,7 @@ function mixPhotos(photos: Photo[]): Photo[] {
   return mixed;
 }
 
+// خوارزمية الـ Masonry عشان تلغي المسافات الفاضية بين الصور
 function distributeColumns(photos: Photo[], columnCount: number): Photo[][] {
   const columns: Photo[][] = Array.from({ length: columnCount }, () => []);
   const heights = new Array(columnCount).fill(0);
@@ -76,6 +78,7 @@ export default function MasonryGallery({ photos, filter }: MasonryGalleryProps) 
     return photos.filter((p) => p.category === filter);
   }, [photos, filter]);
 
+  // تقسيم الأعمدة للموبايل (عمود واحد) والديسكتوب (عمودين)
   const colsDesktop = useMemo(() => distributeColumns(filtered, 2), [filtered]);
   const colsMobile = useMemo(() => distributeColumns(filtered, 1), [filtered]);
 
@@ -139,7 +142,6 @@ interface GalleryItemProps {
 
 function GalleryItem({ photo, index, user, onRequireAuth }: GalleryItemProps) {
   const ref = useRef(null);
-  // Trigger animation once when 50px of the item is in view
   const isInView = useInView(ref, { once: true, margin: "-50px" });
 
   const [isLiked, setIsLiked] = useState(false);
@@ -148,11 +150,24 @@ function GalleryItem({ photo, index, user, onRequireAuth }: GalleryItemProps) {
   const [comments, setComments] = useState<CommentType[]>([]);
   const [newComment, setNewComment] = useState("");
 
-  // Generate realistic Camera EXIF data based on Photo ID (deterministic)
+  // اللوجيك بتاعك زي ما هو لحساب اللايكات
+  const baseLikes = useMemo(() => {
+    let hash = 0;
+    for (let i = 0; i < photo.id.length; i++) {
+      hash = photo.id.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const abs = Math.abs(hash);
+
+    if (photo.isUploaded) {
+      return 450 + (abs % 101); // 450 → 550
+    }
+    return 180 + (abs % 750);
+  }, [photo.id, photo.isUploaded]);
+
+  // توليد بيانات الكاميرا الوهمية الثابتة لكل صورة
   const exifData = useMemo(() => {
     const lenses = ["24mm", "35mm", "50mm", "85mm"];
     const apertures = ["f/1.4", "f/1.8", "f/2.8", "f/4.0"];
-    const shutters = ["1/125s", "1/250s", "1/500s", "1/1000s"];
     const isos = [100, 200, 400, 800];
     
     let hash = 0;
@@ -164,57 +179,93 @@ function GalleryItem({ photo, index, user, onRequireAuth }: GalleryItemProps) {
     return {
       lens: lenses[hash % lenses.length],
       aperture: apertures[(hash + 1) % apertures.length],
-      shutter: shutters[(hash + 2) % shutters.length],
       iso: isos[(hash + 3) % isos.length],
-      likesBase: 180 + (hash % 750)
     };
   }, [photo.id]);
 
   useEffect(() => {
     let mounted = true;
+
     const fetchData = async () => {
-      const { data: likes } = await supabase.from("likes").select("user_id").eq("photo_id", photo.id);
+      const { data: likes } = await supabase
+        .from("likes")
+        .select("user_id")
+        .eq("photo_id", photo.id);
+
       if (!mounted) return;
+
       if (likes) {
-        setLikeCount(likes.length + exifData.likesBase);
+        setLikeCount(likes.length + baseLikes);
         if (user) setIsLiked(likes.some((l: { user_id: string }) => l.user_id === user.id));
       } else {
-        setLikeCount(exifData.likesBase);
+        setLikeCount(baseLikes);
       }
+
       if (user) {
-        const { data: saves } = await supabase.from("saves").select("id").eq("photo_id", photo.id).eq("user_id", user.id);
+        const { data: saves } = await supabase
+          .from("saves")
+          .select("id")
+          .eq("photo_id", photo.id)
+          .eq("user_id", user.id);
         if (mounted && saves && saves.length > 0) setIsSaved(true);
       }
-      const { data: fetchedComments } = await supabase.from("comments").select("user_email, content").eq("photo_id", photo.id).order("created_at", { ascending: true });
+
+      const { data: fetchedComments } = await supabase
+        .from("comments")
+        .select("user_email, content")
+        .eq("photo_id", photo.id)
+        .order("created_at", { ascending: true });
+
       if (mounted && fetchedComments) setComments(fetchedComments as CommentType[]);
     };
+
     fetchData();
-    return () => { mounted = false; };
-  }, [photo.id, user, exifData.likesBase]);
+    return () => {
+      mounted = false;
+    };
+  }, [photo.id, user, baseLikes]);
 
   const handleLike = async () => {
     if (!user) return onRequireAuth();
+
     const nextLiked = !isLiked;
     setIsLiked(nextLiked);
     setLikeCount((prev) => (nextLiked ? prev + 1 : prev - 1));
+
     if (nextLiked) {
       const { error } = await supabase.from("likes").insert({ user_id: user.id, photo_id: photo.id });
-      if (error) { setIsLiked(false); setLikeCount((prev) => prev - 1); }
+      if (error) {
+        setIsLiked(false);
+        setLikeCount((prev) => prev - 1);
+      }
     } else {
-      const { error } = await supabase.from("likes").delete().eq("user_id", user.id).eq("photo_id", photo.id);
-      if (error) { setIsLiked(true); setLikeCount((prev) => prev + 1); }
+      const { error } = await supabase
+        .from("likes")
+        .delete()
+        .eq("user_id", user.id)
+        .eq("photo_id", photo.id);
+      if (error) {
+        setIsLiked(true);
+        setLikeCount((prev) => prev + 1);
+      }
     }
   };
 
   const handleSave = async () => {
     if (!user) return onRequireAuth();
+
     const nextSaved = !isSaved;
     setIsSaved(nextSaved);
+
     if (nextSaved) {
       const { error } = await supabase.from("saves").insert({ user_id: user.id, photo_id: photo.id });
       if (error) setIsSaved(false);
     } else {
-      const { error } = await supabase.from("saves").delete().eq("user_id", user.id).eq("photo_id", photo.id);
+      const { error } = await supabase
+        .from("saves")
+        .delete()
+        .eq("user_id", user.id)
+        .eq("photo_id", photo.id);
       if (error) setIsSaved(true);
     }
   };
@@ -224,18 +275,28 @@ function GalleryItem({ photo, index, user, onRequireAuth }: GalleryItemProps) {
     if (!user) return onRequireAuth();
     const trimmed = newComment.trim();
     if (!trimmed) return;
-    const commentData = { user_id: user.id, user_email: user.email || "guest", photo_id: photo.id, content: trimmed.slice(0, 500) };
+
+    const commentData = {
+      user_id: user.id,
+      user_email: user.email || "guest",
+      photo_id: photo.id,
+      content: trimmed.slice(0, 500),
+    };
+
     setComments((prev) => [...prev, { user_email: commentData.user_email, content: commentData.content }]);
     setNewComment("");
+
     const { error } = await supabase.from("comments").insert(commentData);
-    if (error) setComments((prev) => prev.filter((c) => c !== commentData));
+    if (error) {
+      setComments((prev) => prev.filter((c) => c !== commentData));
+    }
   };
 
   return (
     <motion.article
       ref={ref}
       className="flex flex-col bg-white w-full border-b border-[#362C28]/10 md:border md:border-[#362C28]/15 md:rounded-[8px] md:shadow-sm overflow-hidden"
-      // Cinematic Entrance Animation: Blurs in and scales slightly
+      // Cinematic Entrance Animation
       initial={{ opacity: 0, y: 40, scale: 0.98, filter: "blur(6px)" }}
       animate={isInView ? { opacity: 1, y: 0, scale: 1, filter: "blur(0px)" } : {}}
       transition={{ duration: 0.8, delay: (index % 2) * 0.1, ease: [0.16, 1, 0.3, 1] }}
@@ -266,7 +327,7 @@ function GalleryItem({ photo, index, user, onRequireAuth }: GalleryItemProps) {
         <MoreHorizontal className="w-4 h-4 md:w-5 md:h-5 text-[#362C28]/60 cursor-pointer hover:text-[#362C28] transition-colors" strokeWidth={1.5} />
       </div>
 
-      {/* Image Container with UNEXPECTED Cinematic Hover Effects */}
+      {/* Image Container with Cinematic Hover Effects */}
       <div
         className="group relative w-full bg-[#111] overflow-hidden cursor-crosshair"
         style={{ aspectRatio: photo.aspect }}
@@ -283,7 +344,7 @@ function GalleryItem({ photo, index, user, onRequireAuth }: GalleryItemProps) {
         {/* Dynamic Vignette Gradient */}
         <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/10 to-black/60 opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
 
-        {/* Viewfinder Brackets (Corners) - They snap into place on hover */}
+        {/* Viewfinder Brackets */}
         <div className="absolute top-5 left-5 w-6 h-6 border-t-[1.5px] border-l-[1.5px] border-white/70 opacity-0 group-hover:opacity-100 transition-all duration-700 transform -translate-x-4 -translate-y-4 group-hover:translate-x-0 group-hover:translate-y-0" />
         <div className="absolute top-5 right-5 w-6 h-6 border-t-[1.5px] border-r-[1.5px] border-white/70 opacity-0 group-hover:opacity-100 transition-all duration-700 transform translate-x-4 -translate-y-4 group-hover:translate-x-0 group-hover:translate-y-0" />
         <div className="absolute bottom-5 left-5 w-6 h-6 border-b-[1.5px] border-l-[1.5px] border-white/70 opacity-0 group-hover:opacity-100 transition-all duration-700 transform -translate-x-4 translate-y-4 group-hover:translate-x-0 group-hover:translate-y-0" />
@@ -297,8 +358,6 @@ function GalleryItem({ photo, index, user, onRequireAuth }: GalleryItemProps) {
               {photo.category.replace("-", "")}
             </span>
           </div>
-          
-          {/* Authentic-looking Camera Data */}
           <div className="flex flex-col items-end text-white/90 font-mono text-[9px] tracking-[0.2em] uppercase space-y-1 text-right drop-shadow-md">
             <span>ISO {exifData.iso}</span>
             <span>{exifData.lens}</span>
@@ -314,12 +373,11 @@ function GalleryItem({ photo, index, user, onRequireAuth }: GalleryItemProps) {
           <p className="font-sans text-[11px] md:text-xs text-white/80 leading-relaxed line-clamp-2 max-w-[90%] md:max-w-[80%] drop-shadow-md">
             {photo.caption}
           </p>
-          {/* Animated Laser Accent Line */}
           <div className="h-[1.5px] bg-gradient-to-r from-gold via-gold/50 to-transparent w-0 group-hover:w-full transition-all duration-[1.2s] ease-out delay-300 mt-4" />
         </div>
       </div>
 
-      {/* Footer / Actions - Instagram Mobile Style */}
+      {/* Footer / Actions - Compact Instagram Mobile Style */}
       <div className="px-3 md:px-4 py-2.5 md:py-4 flex flex-col bg-white">
         <div className="flex items-center justify-between mb-2 md:mb-3">
           <div className="flex items-center gap-3 md:gap-4">
@@ -340,6 +398,7 @@ function GalleryItem({ photo, index, user, onRequireAuth }: GalleryItemProps) {
             >
               <MessageCircle className="w-[22px] h-[22px] md:w-6 md:h-6 text-[#362C28] hover:text-[#8C6A53] transition-colors" strokeWidth={1.5} />
             </button>
+            <Send className="w-[22px] h-[22px] md:w-6 md:h-6 text-[#362C28] hover:text-[#8C6A53] transition-colors cursor-pointer" strokeWidth={1.5} />
           </div>
           <button onClick={handleSave} className="focus:outline-none transition-transform active:scale-90">
             <Bookmark

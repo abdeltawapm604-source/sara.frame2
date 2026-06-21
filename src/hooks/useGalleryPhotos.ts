@@ -22,7 +22,7 @@ async function fetchUploadedPhotos(): Promise<Photo[]> {
     .order("created_at", { ascending: false });
 
   if (error || !data) return [];
-  return data as DbPhotoRow[] as Photo[];
+  return (data as DbPhotoRow[]).map((row) => ({ ...row, isUploaded: true })) as Photo[];
 }
 
 export function useGalleryPhotos(staticPhotos: Photo[]) {
